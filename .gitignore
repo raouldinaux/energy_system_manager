@@ -1,5 +1,7 @@
 .streamlit/secrets.toml
 
+.streamlit/energy-manager-ed733-firebase-adminsdk-fbsvc-f4489abd7c.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

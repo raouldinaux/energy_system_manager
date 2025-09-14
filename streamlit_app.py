@@ -1,12 +1,18 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+
+
 import pandas as pd
 import math
 from pathlib import Path
+from firebase_admin import credentials, firestore
+import firebase_admin
+
+from datetime import datetime as dt
 
 import plotly.express as px
 
-
-import os
+import os, json
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
@@ -14,22 +20,109 @@ st.set_page_config(
     page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
 )
 
-
-os.environ['FIREBASE_KEY'] = st.secrets['FIREBASE_KEY']
-
-
-
-from firebase_admin import credentials, firestore
-import firebase_admin
+# firebase_key = st.secrets['FIREBASE_KEY']
 
 if not firebase_admin._apps:
-    firebase_admin.initialize_app(credentials.Certificate("energy-manager-ed733-firebase-adminsdk-fbsvc-f4489abd7c.json"))
+    firebase_admin.initialize_app(credentials.Certificate(".streamlit/energy-manager-ed733-firebase-adminsdk-fbsvc-f4489abd7c.json"))
 db = firestore.client()
 
 
-# Data loading
+# Data 
 @st.cache_data
+def load_data():
+    docs = db.collection("kwh_price").stream()
+    data = []
+    for doc in docs:
+        d = doc.to_dict()
+        # Assume Firestore doc has fields: "timestamp" and "price"
+        data.append({"timestamp": d["timestamp"], "price": d["price"]})
+    df = pd.DataFrame(data)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp")
+    return df
 
+df = load_data()
+
+
+
+# --- UI CONTROLS ---
+st.title("📈 Price Time Series from Firestore")
+
+
+if df.empty:
+    st.warning("No data available in Firestore yet.")
+else:
+    # Let user pick time range
+    min_date, max_date = df["timestamp"].min(), df["timestamp"].max()
+    st.sidebar.header("X-Axis Scale")
+    start_date = st.sidebar.date_input(
+        "Start", min_date.date(), min_value=min_date.date(), max_value=max_date.date()
+    )
+    end_date = st.sidebar.date_input(
+        "End", max_date.date(), min_value=min_date.date(), max_value=max_date.date()
+    )
+
+    # Filter dataframe based on selection
+    mask = (df["timestamp"].dt.date >= start_date) & (df["timestamp"].dt.date <= end_date)
+    filtered_df = df.loc[mask]
+
+    # Plot
+    fig = px.line(filtered_df, x="timestamp", y="price", title="Price Development")
+    fig.update_xaxes(rangeslider_visible=True)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+# command sender
+def send_command_to_db(command):
+    # Data to store
+    data = {
+        "timestamp": dt.now(),
+        "user_command": command
+    }
+    db.collection("user_commands").document(dt.now().strftime("%Y-%m-%d_%H:%M:%S")).set(data)
+
+
+def get_latest_command():
+    """Fetch the most recent command"""
+    docs = (
+        db.collection("user_commands")
+        .order_by("timestamp", direction=firestore.Query.DESCENDING)
+        .limit(1)
+        .stream()
+    )
+    latest = None
+    for doc in docs:
+        latest = doc.to_dict().get("user_command", 0)
+        # print(f"Latest command from DB: {latest}")
+    return int(latest) if latest is not None else 0
+
+# --- Streamlit UI ---
+st.title("🔋 Battery Control")
+
+# Auto-refresh every 10 seconds
+refresh_interval = st.sidebar.number_input("Auto-refresh interval (sec)", 5, 60, 10)
+
+st_autorefresh(interval=refresh_interval * 1000, key="refresh")
+
+# Initialize session state from Firestore (first load only)
+if "battery_state" not in st.session_state:
+    st.session_state.battery_state = get_latest_command()
+
+# Toggle bound to session state
+toggle_state = st.toggle("Battery ON/OFF", value=st.session_state.battery_state == 1)
+
+# Detect change -> update Firestore
+new_state = 1 if toggle_state else 0
+if new_state != st.session_state.battery_state:
+    send_command_to_db(new_state)
+    st.session_state.battery_state = new_state
+    st.toast(f"Sent command: {new_state}")
+
+# Always check Firestore for external changes (e.g. another user)
+latest_command = get_latest_command()
+if latest_command != st.session_state.battery_state:
+    st.session_state.battery_state = latest_command
+    st.experimental_rerun()
 
 
 
