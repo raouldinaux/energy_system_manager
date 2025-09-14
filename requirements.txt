@@ -2,3 +2,4 @@ streamlit
 pandas
 firebase_admin
 plotly
+streamlit_autorefresh
